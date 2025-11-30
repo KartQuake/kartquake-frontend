@@ -1,10 +1,14 @@
 // src/App.tsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import WatchlistPage from "./WatchlistPage";
 
-const API_BASE = "http://127.0.0.1:8000";
-const USER_ID = "87cf4502-4455-428c-b039-1db39237f107"; // used for Watchlist page for now
+// Use env var in prod, localhost in dev
+const API_BASE =
+  import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+
+// Still used only for Watchlist page *for now*
+const USER_ID = "87cf4502-4455-428c-b039-1db39237f107";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -75,8 +79,10 @@ type BillingProductKey = "premium" | "costco_addon";
 // Main Smart Shopper UI
 // ------------------------------
 const SmartShopper: React.FC = () => {
-  const [userIdInput, setUserIdInput] = useState("");
+  // 🔐 Auth state
   const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
@@ -160,27 +166,112 @@ const SmartShopper: React.FC = () => {
   };
 
   // --------------------------
-  // User ID handling
+  // Auth / signup flow
   // --------------------------
 
-  const handleSetUser = async () => {
-    const trimmed = userIdInput.trim();
-    if (!trimmed) {
-      alert("Please paste a valid user UUID.");
-      return;
-    }
-    setUserId(trimmed);
-    setPlanResult(null);
-    setShoppingList([]);
-    setChatMessages([
-      {
-        role: "assistant",
-        content:
-          "User set. Now tell me what you want to buy and I’ll build your shopping list.",
-      },
-    ]);
+  // On load:
+  // 1) Check URL for ?user_id= (OAuth callback)
+  // 2) Check localStorage for existing user
+  // 3) Otherwise, show signup UI
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const fromOAuth = params.get("user_id");
 
-    await fetchWatchlistForUser(trimmed);
+        if (fromOAuth) {
+          localStorage.setItem("kartquake_user_id", fromOAuth);
+          setUserId(fromOAuth);
+          await fetchWatchlistForUser(fromOAuth);
+          // Clean query string
+          window.history.replaceState(
+            {},
+            document.title,
+            window.location.pathname
+          );
+          setAuthLoading(false);
+          return;
+        }
+
+        const existing = localStorage.getItem("kartquake_user_id");
+        if (existing) {
+          setUserId(existing);
+          await fetchWatchlistForUser(existing);
+          setAuthLoading(false);
+          return;
+        }
+
+        // No user yet → show signup UI
+        setAuthLoading(false);
+      } catch (err) {
+        console.error("Error during auth init:", err);
+        setAuthError("Could not initialize sign-in. Please refresh.");
+        setAuthLoading(false);
+      }
+    };
+
+    void initAuth();
+  }, []);
+
+  // Anonymous signup via backend
+  const handleGuestSignup = async () => {
+    try {
+      setAuthError(null);
+      setAuthLoading(true);
+
+      // You’ll need POST /users on the backend that creates a user
+      // and returns { id: "<uuid>" } or { user_id: "<uuid>" }.
+      const resp = await fetch(`${API_BASE}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          auth_provider: "anonymous",
+        }),
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(
+          `Signup failed (${resp.status}): ${text || "Unknown error"}`
+        );
+      }
+
+      const data = await resp.json();
+      const newUserId: string = data.id || data.user_id;
+      if (!newUserId) {
+        throw new Error("No user_id returned from /users");
+      }
+
+      localStorage.setItem("kartquake_user_id", newUserId);
+      setUserId(newUserId);
+      await fetchWatchlistForUser(newUserId);
+    } catch (err: any) {
+      console.error("Guest signup error:", err);
+      setAuthError(
+        "Could not sign you in as guest. Please try again or refresh."
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Google sign-in: backend should start OAuth and eventually redirect
+  // back to FRONTEND_URL?user_id=<uuid>
+  const handleGoogleSignIn = () => {
+    setAuthError(null);
+    const redirectUrl = window.location.origin; // e.g. https://kartquake.vercel.app
+    window.location.href = `${API_BASE}/auth/google/start?redirect_url=${encodeURIComponent(
+      redirectUrl
+    )}`;
+  };
+
+  // Apple sign-in: same idea as Google
+  const handleAppleSignIn = () => {
+    setAuthError(null);
+    const redirectUrl = window.location.origin;
+    window.location.href = `${API_BASE}/auth/apple/start?redirect_url=${encodeURIComponent(
+      redirectUrl
+    )}`;
   };
 
   // --------------------------
@@ -189,7 +280,7 @@ const SmartShopper: React.FC = () => {
 
   const handleSendMessage = async () => {
     if (!userId) {
-      alert("Please set a user ID first.");
+      console.warn("No userId set; cannot send message.");
       return;
     }
     const msg = chatInput.trim();
@@ -215,7 +306,7 @@ const SmartShopper: React.FC = () => {
         appendChatMessage({
           role: "assistant",
           content:
-            "Hmm, something went wrong talking to the backend. Check if the backend is running or if the user ID is valid.",
+            "Hmm, something went wrong talking to the backend. Check if the backend is running or if your account is valid.",
         });
         return;
       }
@@ -244,7 +335,7 @@ const SmartShopper: React.FC = () => {
 
   const handleToggleWatch = async (itemId: string) => {
     if (!userId) {
-      alert("Please set a user ID first.");
+      console.warn("No userId set; cannot toggle watch.");
       return;
     }
     try {
@@ -276,7 +367,7 @@ const SmartShopper: React.FC = () => {
 
   const handleBuildPlan = async () => {
     if (!userId) {
-      alert("Please set a user ID before building a plan.");
+      console.warn("No userId set; cannot build plan.");
       return;
     }
 
@@ -319,7 +410,7 @@ const SmartShopper: React.FC = () => {
 
   const handleUpgradePlan = async (product: BillingProductKey) => {
     if (!userId) {
-      alert("Please set a user ID before upgrading a plan.");
+      console.warn("No userId set; cannot upgrade plan.");
       return;
     }
 
@@ -332,7 +423,6 @@ const SmartShopper: React.FC = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: userId,
-          // IMPORTANT: backend expects `plan`, not `product`
           plan: product, // "premium" or "costco_addon"
         }),
       });
@@ -515,7 +605,165 @@ const SmartShopper: React.FC = () => {
   };
 
   // --------------------------
-  // JSX
+  // Auth gate UI
+  // --------------------------
+
+  if (authLoading) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          backgroundColor: "#0f172a",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#e5e7eb",
+          fontFamily:
+            "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI'",
+        }}
+      >
+        <div
+          style={{
+            backgroundColor: "#020617",
+            padding: 20,
+            borderRadius: 12,
+            boxShadow: "0 0 0 1px rgba(148,163,184,0.2)",
+            minWidth: 260,
+          }}
+        >
+          <h1 style={{ fontSize: "1.2rem", fontWeight: 600, marginBottom: 8 }}>
+            Kartquake
+          </h1>
+          <p style={{ fontSize: "0.85rem", color: "#9ca3af" }}>
+            Signing you in and getting things ready…
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!userId) {
+    // Signup / sign-in screen
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          backgroundColor: "#0f172a",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#e5e7eb",
+          fontFamily:
+            "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI'",
+          padding: 16,
+        }}
+      >
+        <div
+          style={{
+            backgroundColor: "#020617",
+            padding: 24,
+            borderRadius: 12,
+            boxShadow: "0 0 0 1px rgba(148,163,184,0.2)",
+            maxWidth: 380,
+            width: "100%",
+          }}
+        >
+          <h1 style={{ fontSize: "1.4rem", fontWeight: 600, marginBottom: 8 }}>
+            Kartquake · Smart Shopper
+          </h1>
+          <p style={{ fontSize: "0.9rem", color: "#9ca3af", marginBottom: 16 }}>
+            Sign in to start building smart shopping plans. You can continue as
+            a guest, or use your Google / Apple account.
+          </p>
+
+          <button
+            onClick={handleGuestSignup}
+            disabled={authLoading}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "none",
+              backgroundColor: authLoading ? "#6b7280" : "#22c55e",
+              color: "#022c22",
+              fontWeight: 600,
+              cursor: authLoading ? "default" : "pointer",
+              fontSize: "0.9rem",
+              marginBottom: 10,
+            }}
+          >
+            Continue as guest
+          </button>
+
+          <button
+            onClick={handleGoogleSignIn}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #4b5563",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              fontWeight: 500,
+              cursor: "pointer",
+              fontSize: "0.9rem",
+              marginBottom: 8,
+            }}
+          >
+            Sign in with Google
+          </button>
+
+          <button
+            onClick={handleAppleSignIn}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #4b5563",
+              backgroundColor: "#020617",
+              color: "#e5e7eb",
+              fontWeight: 500,
+              cursor: "pointer",
+              fontSize: "0.9rem",
+              marginBottom: 12,
+            }}
+          >
+            Sign in with Apple
+          </button>
+
+          {authError && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                borderRadius: 8,
+                border: "1px solid #b91c1c",
+                backgroundColor: "#7f1d1d",
+                color: "#fecaca",
+                fontSize: "0.8rem",
+              }}
+            >
+              {authError}
+            </div>
+          )}
+
+          <div
+            style={{
+              fontSize: "0.75rem",
+              color: "#6b7280",
+              marginTop: 8,
+            }}
+          >
+            We’ll store a simple user ID in your browser so your lists and
+            plans stay linked to you.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------
+  // Main JSX (unchanged layout, minus user ID input)
   // --------------------------
 
   return (
@@ -554,50 +802,39 @@ const SmartShopper: React.FC = () => {
             Kartquake · Smart Shopper
           </h1>
 
-          {/* User ID input */}
+          {/* Small account pill instead of user ID input */}
           <div
             style={{
+              fontSize: "0.75rem",
+              color: "#9ca3af",
               display: "flex",
-              gap: 8,
+              justifyContent: "space-between",
               alignItems: "center",
               marginBottom: 4,
             }}
           >
-            <input
-              style={{
-                flex: 1,
-                padding: "6px 8px",
-                borderRadius: 6,
-                border: "1px solid #4b5563",
-                backgroundColor: "#020617",
-                color: "#e5e7eb",
-                fontSize: "0.85rem",
-              }}
-              placeholder="Paste your user UUID from /users"
-              value={userIdInput}
-              onChange={(e) => setUserIdInput(e.target.value)}
-            />
+            <span>
+              Signed in as{" "}
+              <code>
+                {userId.slice(0, 6)}…{userId.slice(-4)}
+              </code>
+            </span>
             <button
-              onClick={handleSetUser}
+              onClick={() => {
+                localStorage.removeItem("kartquake_user_id");
+                window.location.reload();
+              }}
               style={{
-                padding: "6px 10px",
-                borderRadius: 6,
                 border: "none",
-                backgroundColor: "#22c55e",
-                color: "#022c22",
-                fontWeight: 600,
+                background: "transparent",
+                color: "#f87171",
                 cursor: "pointer",
-                fontSize: "0.85rem",
+                fontSize: "0.75rem",
               }}
             >
-              Use ID
+              reset
             </button>
           </div>
-          {userId && (
-            <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
-              Active user: <code>{userId}</code>
-            </div>
-          )}
 
           {/* Chat area */}
           <div
@@ -1095,6 +1332,7 @@ const App: React.FC = () => {
       </nav>
       <Routes>
         <Route path="/" element={<SmartShopper />} />
+        {/* Watchlist still uses STATIC user for now */}
         <Route path="/watchlist" element={<WatchlistPage userId={USER_ID} />} />
       </Routes>
     </BrowserRouter>
